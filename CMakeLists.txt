@@ -120,9 +120,10 @@ execute_process(
 	WORKING_DIRECTORY ${PX4_SOURCE_DIR}
 	)
 
-# if proper git tag unavilable default to v0.0.0
+# 若没有可用的 git 标签（fork 克隆通常未拉取 v* 标签），回退到本代码树所基于的
+# PX4 版本；沿用 v0.0.0 会被地面站判定为固件版本过低/无效
 if(NOT ${GIT_DESCRIBE_RESULT} MATCHES "0")
-	set(PX4_GIT_TAG "v0.0.0")
+	set(PX4_GIT_TAG "v1.17.0")
 endif()
 
 message(STATUS "PX4_GIT_TAG: ${PX4_GIT_TAG}")
