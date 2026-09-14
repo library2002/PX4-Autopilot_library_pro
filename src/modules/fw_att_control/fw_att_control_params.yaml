@@ -183,3 +183,18 @@ parameters:
       max: 90.0
       decimal: 1
       increment: 0.5
+    FW_FORM_YAW_EN:
+      description:
+        short: Accept yaw rate command from the chain-wing formation link
+        long: |-
+          When enabled, the yaw rate command received on
+          vehicle_attitude_setpoint.yaw_sp_move_rate is added to the yaw rate
+          setpoint, in the same way the pilot yaw stick is added in manual modes.
+          This gives the wingtip followers of a chain-wing aircraft a yaw channel:
+          the fixed-wing attitude loop strips the yaw error (an aircraft has no
+          direct yaw authority through attitude), so the yaw rate setpoint is the
+          only place a yaw command can enter. The followers' own turn
+          coordination feedforward is kept, so only the shared intent is added.
+          Leave disabled unless this vehicle is a chain-wing follower.
+      type: boolean
+      default: 0

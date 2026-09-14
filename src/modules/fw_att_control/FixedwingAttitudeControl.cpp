@@ -130,6 +130,11 @@ FixedwingAttitudeControl::vehicle_attitude_setpoint_poll()
 		const Quatf q_d(att_sp.q_d);
 		q_d.copyTo(_att_sp.q_d);
 
+		// Chain-wing formation: the follower receives its yaw rate command through
+		// this field. It has to be persisted here, otherwise the injection below
+		// would read a stale value.
+		_att_sp.yaw_sp_move_rate = att_sp.yaw_sp_move_rate;
+
 		_rates_sp.thrust_body[0] = att_sp.thrust_body[0];
 		_rates_sp.thrust_body[1] = att_sp.thrust_body[1];
 		_rates_sp.thrust_body[2] = att_sp.thrust_body[2];
@@ -311,6 +316,26 @@ void FixedwingAttitudeControl::Run()
 					/* add yaw rate setpoint from sticks in all attitude-controlled modes */
 					if (_vcontrol_mode.flag_control_manual_enabled) {
 						body_rates_setpoint(2) += math::constrain(_manual_control_setpoint.yaw * radians(_param_man_yr_max.get()),
+									  -radians(_param_fw_y_rmax.get()), radians(_param_fw_y_rmax.get()));
+					}
+
+					// Chain-wing formation: accept the master's yaw rate command
+					// (wingtip followers only).
+					//
+					// This mirrors the pilot stick path directly above on purpose:
+					// same injection point, same clamping, same downstream (rate
+					// controller -> torque -> allocator). The two cannot both be
+					// active (the manual stick requires flag_control_manual_enabled,
+					// the follower runs in OFFBOARD where that flag is false), so no
+					// arbitration is needed. The followers' own turn coordination
+					// feedforward stays untouched, only the shared intent is added.
+					//
+					// PX4_ISFINITE alone is not a sufficient gate: a zero-initialized
+					// yaw_sp_move_rate is finite, so an explicit enable is used.
+					if (_param_fw_form_yaw_en.get()
+					    && _vcontrol_mode.flag_control_offboard_enabled
+					    && PX4_ISFINITE(_att_sp.yaw_sp_move_rate)) {
+						body_rates_setpoint(2) += math::constrain(_att_sp.yaw_sp_move_rate,
 									  -radians(_param_fw_y_rmax.get()), radians(_param_fw_y_rmax.get()));
 					}
 

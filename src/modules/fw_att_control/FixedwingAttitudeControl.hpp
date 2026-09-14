@@ -178,7 +178,10 @@ private:
 		(ParamFloat<px4::params::FW_WR_P>) _param_fw_wr_p,
 
 		(ParamFloat<px4::params::FW_Y_RMAX>) _param_fw_y_rmax,
-		(ParamFloat<px4::params::FW_MAN_YR_MAX>) _param_man_yr_max
+		(ParamFloat<px4::params::FW_MAN_YR_MAX>) _param_man_yr_max,
+
+		// Chain-wing formation: consume the master's yaw rate command.
+		(ParamBool<px4::params::FW_FORM_YAW_EN>) _param_fw_form_yaw_en
 	)
 
 	matrix::Vector3f _proportional_gain;
