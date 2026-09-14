@@ -295,3 +295,96 @@ parameters:
       type: boolean
       default: 0
       reboot_required: true
+- group: Formation Control
+  definitions:
+    FORM_FOLLOWER_EN:
+      description:
+        short: Chain-wing formation role
+        long: |-
+          Selects the chain-wing formation role of this vehicle.
+          0 - Master (center body): broadcasts nuaa.formation.ControlInput to
+              the wingtip followers.
+          1 - Follower (wingtip body): receives ControlInput and tracks the
+              master setpoints.
+          All formation parameters share the FORM_ prefix and are used by the
+          UAVCAN formation link and by the ControlAllocator.
+      type: boolean
+      default: 0
+      reboot_required: true
+    FORM_POSITION:
+      description:
+        short: Chain-wing formation position
+        long: |-
+          Physical position of this vehicle in the chain-wing assembly. Sets
+          side_sign to +1 (LEFT), -1 (RIGHT) or 0 (CENTER), which drives the
+          follower hinge correction direction and the ControlAllocator mixing.
+          The CENTER body does not apply any hinge correction.
+      type: enum
+      values:
+        0: CENTER
+        1: LEFT
+        2: RIGHT
+      default: 0
+      min: 0
+      max: 2
+      reboot_required: true
+    FORM_ROLL_LIM:
+      description:
+        short: Chain-wing roll/pitch setpoint limit
+        long: |-
+          Maximum absolute roll and pitch angle setpoint applied to the
+          follower. NOTE: despite the name this is an ATTITUDE limit, not a
+          rate limit; the name is kept for continuity with the previous
+          implementation.
+      type: float
+      default: 45.0
+      min: 0.0
+      max: 90.0
+      unit: deg
+      decimal: 1
+    FORM_HINGE_K:
+      description:
+        short: Chain-wing hinge correction gain
+        long: |-
+          Gain of the follower hinge correction. The follower pitch setpoint is
+          offset by side_sign * FORM_HINGE_K * (master desired roll rate), so
+          the gain has units of time.
+      type: float
+      default: 1.0
+      min: 0.0
+      max: 5.0
+      unit: s
+      decimal: 3
+    FORM_YAW_K:
+      description:
+        short: Chain-wing yaw throttle boost gain
+        long: |-
+          Gain of the yaw throttle boost applied by the control allocator. The
+          boost compensates the yaw authority lost when several bodies are linked
+          together (the assembly yaw inertia grows much faster than the rudder
+          authority), by adding thrust to the wing that is on the outside of the
+          turn. The driver is the yaw control demand, so the boost is active
+          whenever yaw authority is needed - including the roll-in and roll-out
+          transients and level flight with a yaw rate command - and not only while
+          banked. It is one-sided (max(side_sign * yaw_demand, 0) for the wingtip
+          followers): the inner wing is never slowed down, so that it keeps its
+          lift.
+      type: float
+      default: 0.3
+      min: 0.0
+      max: 5.0
+      decimal: 3
+    FORM_MSTR_YAW_SC:
+      description:
+        short: Chain-wing yaw throttle boost scale for the center body
+        long: |-
+          Fraction of the wingtip boost that is also applied to the center body
+          during a formation turn. Non-zero deliberately adds thrust to the center
+          body too, which speeds the whole assembly up instead of slowing the inner
+          wing down. Zero disables the center-body boost entirely (and therefore
+          leaves a standalone fixed-wing unaffected).
+      type: float
+      default: 0.0
+      min: 0.0
+      max: 1.0
+      decimal: 3

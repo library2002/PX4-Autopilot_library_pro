@@ -34,6 +34,19 @@ if DRIVERS_UAVCAN
         bool "Include rgb controller"
         default y
 
+    config UAVCAN_FORMATION_CONTROLLER
+        bool "Include chain-wing formation master sender"
+        default y
+        # The sender converts the pilot yaw stick with the fixed-wing attitude
+        # controller parameters (FW_MAN_YR_MAX, FW_Y_RMAX) so that the
+        # transmitted command reproduces the master's own result exactly. Those
+        # parameters only exist when the fixed-wing module is in the build.
+        depends on MODULES_FW_ATT_CONTROL
+
+    config UAVCAN_FORMATION_BRIDGE
+        bool "Include chain-wing formation follower bridge"
+        default y
+
     config UAVCAN_SENSOR_ACCEL
         bool "Subscribe to IMU:                         uavcan::equipment::ahrs::RawIMU"
         default y

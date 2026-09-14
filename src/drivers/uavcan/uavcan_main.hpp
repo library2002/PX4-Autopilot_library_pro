@@ -67,6 +67,14 @@
 #include "beep.hpp"
 #endif
 
+#if defined(CONFIG_UAVCAN_FORMATION_CONTROLLER)
+#include "formation_rates_sender.hpp"
+#endif
+
+#if defined(CONFIG_UAVCAN_FORMATION_BRIDGE)
+#include "formation_rates_bridge.hpp"
+#endif
+
 #include "logmessage.hpp"
 
 #if defined(CONFIG_UAVCAN_REMOTEID_CONTROLLER)
@@ -269,6 +277,12 @@ private:
 #endif
 #if defined(CONFIG_UAVCAN_BEEP_CONTROLLER)
 	UavcanBeepController		_beep_controller;
+#endif
+#if defined(CONFIG_UAVCAN_FORMATION_CONTROLLER)
+	FormationRatesSender		_formation_rates_sender;
+#endif
+#if defined(CONFIG_UAVCAN_FORMATION_BRIDGE)
+	FormationRatesBridge		_formation_rates_bridge;
 #endif
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
 	UavcanEscController		_esc_controller;

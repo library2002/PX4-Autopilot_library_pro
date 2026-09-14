@@ -110,12 +110,23 @@ target_include_directories(uavcan_${UAVCAN_DRIVER}_driver PUBLIC
 
 
 # generated DSDL
+# NOTE: each entry is a *root namespace directory*. The DSDL compiler derives
+# the root namespace from the basename of the directory listed here, so the
+# chain-wing formation messages must be added as .../dsdl_custom/nuaa (NOT
+# .../dsdl_custom), which yields the type nuaa.formation.*. The dsdl_custom tree
+# is maintained by this fork; libdronecan/dsdl is an upstream submodule and must
+# not be modified.
+set(DSDLC_DIRS_CUSTOM
+	"${PX4_SOURCE_DIR}/src/drivers/uavcan/dsdl_custom/nuaa"
+)
+
 set(DSDLC_INPUTS
 	"${DSDLC_DIR}/ardupilot"
 	"${DSDLC_DIR}/com"
 	"${DSDLC_DIR}/cuav"
 	"${DSDLC_DIR}/dronecan"
 	"${DSDLC_DIR}/uavcan"
+	${DSDLC_DIRS_CUSTOM}
 )
 set(DSDLC_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/include/dsdlc_generated")
 
@@ -165,6 +176,12 @@ px4_add_module(
 		uavcan_main.cpp
 		uavcan_servers.cpp
 		node_info.cpp
+
+		# Formation (chain-wing master -> follower link)
+		formation_rates_sender.cpp
+		formation_rates_sender.hpp
+		formation_rates_bridge.cpp
+		formation_rates_bridge.hpp
 
 		# Actuators
 		actuators/esc.cpp

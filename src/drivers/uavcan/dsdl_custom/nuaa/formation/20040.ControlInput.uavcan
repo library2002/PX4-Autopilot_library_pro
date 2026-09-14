@@ -1,0 +1,48 @@
+#
+# Formation ControlInput
+#
+# Chain-wing UAV master (center body) -> follower link, broadcast over DroneCAN.
+#
+# IMPORTANT: all angular quantities are in radians (rad, rad/s) and carry
+# *setpoints*, NOT normalized stick / raw control inputs. This is the actual
+# data semantics loaded by the master sender; keep this comment in sync with
+# the implementation (a stale comment here was a known issue in the previous
+# code base).
+#
+
+# Normalized thrust command [0, 1]
+float16 thrust
+
+# Master pitch angle setpoint [rad]
+float16 pitch
+
+# Master yaw rate command [rad/s].
+#
+# In pilot-flown modes this is the *pilot's yaw intent only* (stick converted
+# with FW_MAN_YR_MAX and clamped with FW_Y_RMAX), NOT the master's full yaw rate
+# setpoint: the turn coordination feedforward is deliberately excluded, because
+# each aircraft has to compute its own from its own airspeed and bank angle.
+# Sending the sum would double count the feedforward on every follower.
+#
+# In autonomous modes it is the navigation yaw rate command
+# (vehicle_attitude_setpoint.yaw_sp_move_rate), which the fixed-wing stack
+# currently leaves at zero - followers then turn purely by banking.
+float16 yaw
+
+# Master roll angle setpoint [rad]
+float16 roll_target
+
+# Master *desired* roll rate setpoint [rad/s].
+#
+# Feedforward reference for the follower hinge correction. Deliberately the
+# setpoint (vehicle_rates_setpoint.roll), NOT the measured body rate: under an
+# external disturbance the followers must aid the master's corrective *intent*,
+# whereas aiding the measured rate would be a positive feedback on the
+# disturbance. See the version-node design record for the stability argument.
+float16 master_roll_signed_err
+
+# Validity flag bit definitions
+uint8 FLAG_VALID = 1
+
+# Validity bitmask, see the FLAG_* constants above
+uint8 flags

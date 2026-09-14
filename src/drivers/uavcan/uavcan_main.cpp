@@ -88,6 +88,12 @@ UavcanNode::UavcanNode(uavcan::ICanDriver &can_driver, uavcan::ISystemClock &sys
 #if defined(CONFIG_UAVCAN_BEEP_CONTROLLER)
 	_beep_controller(_node),
 #endif
+#if defined(CONFIG_UAVCAN_FORMATION_CONTROLLER)
+	_formation_rates_sender(_node),
+#endif
+#if defined(CONFIG_UAVCAN_FORMATION_BRIDGE)
+	_formation_rates_bridge(_node),
+#endif
 #if defined(CONFIG_UAVCAN_OUTPUTS_CONTROLLER)
 	_esc_controller(_node),
 	_servo_controller(_node),
@@ -546,6 +552,24 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 
 #if defined(CONFIG_UAVCAN_BEEP_CONTROLLER)
 	ret = _beep_controller.init();
+
+	if (ret < 0) {
+		return ret;
+	}
+
+#endif
+
+#if defined(CONFIG_UAVCAN_FORMATION_CONTROLLER)
+	ret = _formation_rates_sender.init();
+
+	if (ret < 0) {
+		return ret;
+	}
+
+#endif
+
+#if defined(CONFIG_UAVCAN_FORMATION_BRIDGE)
+	ret = _formation_rates_bridge.init();
 
 	if (ret < 0) {
 		return ret;
