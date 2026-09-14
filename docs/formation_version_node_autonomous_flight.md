@@ -603,9 +603,9 @@ ControlAllocator                ──► actuator_motors / actuator_servos
 | ---- | ---- | ---- |
 | ① | **发送端：手动模式改发"纯杆量偏航率"** | 主机发出 `manual_control_setpoint.yaw × FW_MAN_YR_MAX`（并 clamp 到 `FW_Y_RMAX`），**剔除协调转弯前馈**。各机用**自身**空速独立计算 $\dot\psi_{ff}=gq_1/V$，只共享驾驶员意图，避免从机双计前馈。自主模式下仍透传 `yaw_sp_move_rate`（该量在固定翼栈中无写入者，实际为 0） |
 | ② | **从机：`fw_att_control` 增加偏航通道（方案 A）** | 在速率设定点处**叠加** `yaw_sp_move_rate`，与手动杆量走**同一注入点、同一限幅、同一下游**。门控：`FW_FORM_YAW_EN`（默认 0）+ `flag_control_offboard_enabled` + `PX4_ISFINITE`。因 `flag_control_manual_enabled` 在 OFFBOARD 下恒为假，必须显式门控（照抄手动杆判据会永不触发） |
-| ③ | **分配层：增推驱动量由 $\tau_z$ 改为 $\tan\phi_{tgt}$** | 外翼额外阻力 $\Delta T\propto\tan\phi$（$V$ 两次抵消，见下）；$\tau_z$ 在稳态转弯中回落至配平值，与"持续需要增推"的需求相位不符。主机按 `FORM_MSTR_YAW_SC`（$\beta\in[0,1]$，默认 0）施加 $|\tan\phi|$ 的份额 |
+| ③ | **分配层：增推驱动量保留 $\tau_z$（$\tan\phi_{tgt}$ 方案评估后未采纳）** | $\tan\phi$ 推导（见下）确认了稳态"持续需要增推"的需求，但坡度驱动在滚转进入/改出瞬态（逆偏航最大、最需要偏航权限的时刻）恰为零、平飞带偏航率指令时无输出；$\tau_z$ 在需要偏航权限的一切工况必然非零，瞬态与稳态均覆盖。主机按 `FORM_MSTR_YAW_SC`（$\beta\in[0,1]$，默认 0）施加 $|\tau_z|$ 的份额 |
 
-**增推驱动量的推导**（取代 §4.3 的"与偏航力矩幅值成正比"表述）：
+**外翼稳态增推需求的推导**（$\tan\phi_{tgt}$ 方案的物理依据；最终实现保留 §4.3 的"与偏航力矩幅值成正比"表述）：
 
 $$
 \Delta V=\dot\psi\,l,\quad
@@ -616,11 +616,13 @@ $$
 \boxed{\ \Delta T\propto\tan\phi\ }
 $$
 
-**物理意义**：外翼多飞的速度 $\Delta V$ 正比于 $V\dot\psi$，而协调转弯下 $\dot\psi\propto1/V$，**$V$ 恰好抵消**——故额外阻力只由坡度角决定，与空速无关。$\tan\phi$ 在稳态转弯中持续非零，正好匹配"持续增推"的需求；用 $\tau_z$ 则稳态下失效。
+**物理意义**：外翼多飞的速度 $\Delta V$ 正比于 $V\dot\psi$，而协调转弯下 $\dot\psi\propto1/V$，**$V$ 恰好抵消**——故稳态额外阻力只由坡度角决定，与空速无关。这确认了稳态转弯中 $\tan\phi$ 持续非零、正好匹配"持续增推"的需求，是 $\tan\phi_{tgt}$ 方案的立论依据。
 
-**两侧均不含内侧减速**：增推为**单侧**（`max(side_sign·tanφ, 0)`，只增不减），内翼保持空速与升力；主机亦按 $\beta$ 增推，使整机略微加速而非让内翼掉速。代价是转弯时多余动能需由姿态控制吸收。
+**为何实现仍取 $\tau_z$（最终裁决）**：$\tan\phi$ 只覆盖**稳态**增推需求，但该通道同时承担**瞬态偏航权限**。滚转进入/改出瞬态恰是逆偏航最大、最需要偏航权限的时刻，而坡度正在过零，$\tan\phi$ 驱动恰在此刻消失；平飞带偏航率指令（如驾驶员蹬杆修正）时 $\phi\approx0$，坡度驱动完全无输出。$\tau_z$（偏航控制需求）则在需要偏航权限的一切工况必然非零——瞬态、稳态、带指令平飞均覆盖。代价：稳态转弯中 $\tau_z$ 回落至配平值附近，稳态增推幅值需靠 $K_{yaw}$ 试飞标定，本节推导的 $\Delta T\propto\tan\phi$ 即稳态标定的理论参考值；若试飞表明稳态增推不足，可评估在此基础上叠加 $\tan\phi_{tgt}$ 前馈项。
 
-**已知的非光滑点**：单侧截断在 $\phi=0$ 处不可微，与抗积分饱和设计存在交互（延续 §4.5-1 的记录）。
+**两侧均不含内侧减速**：增推为**单侧**（`max(side_sign·τz, 0)`，只增不减），内翼保持空速与升力；主机亦按 $\beta$ 施加 $|\tau_z|$ 份额的增推，使整机略微加速而非让内翼掉速。代价是转弯时多余动能需由姿态控制吸收。
+
+**已知的非光滑点**：单侧截断在 $\tau_z=0$ 处不可微（偏航需求过零，而非坡度过零），与抗积分饱和设计存在交互（延续 §4.5-1 的记录）。
 
 **已识别的通道语义更正**：接收端 `q_d` 中取 `self_yaw`（原 §3.3③"航向保持"）在姿态层是 **no-op**——航向分量被 `computeAttitudeError` 剥离。从机航向实际由"偏航速率指令为零 + 风标稳定性 + 铰链约束"自然维持，机制是**不干预**而非"闭环保持"。功能正确，但原表述的机理不成立。
 
@@ -633,7 +635,7 @@ $$
 1. **DSDL 消息** `nuaa.formation.ControlInput`（DTID 20040），置于 `src/drivers/uavcan/dsdl_custom/nuaa/formation/`。命名空间由 `DSDLC_INPUTS` 中**源目录 basename** 决定，故须加 `.../dsdl_custom/nuaa` 这一层。
 2. **主机发送端** `FormationRatesSender`。偏航源判据采用 `flag_control_manual_enabled`——与 `fw_att_control` / `fw_rate_control` 决定"杆量是否进入 `rates_setpoint.yaw`"的判据**同源**，构造上不会随 `nav_state` 重新编号或新增人工模式而漂移。
 3. **从机接收端** `FormationRatesBridge`。按 §3.3 解算并发布 `offboard_control_mode` + `vehicle_attitude_setpoint`；架构定位由旧系统的 `sensors/` 桥改为与发送端对称的 link 控制器（`UavcanSensorBridgeBase` 的通道/device-id 抽象不适用于控制设定点链路）。
-4. **ControlAllocator 编队混控**（对应 §4，驱动量已按 §9.5b 更正）：滚→俯混控 `c(PITCH) += c(ROLL)·CA_RLL2PIT_K·side_sign`（从机、两矩阵均生效）；转弯增推 `c(THRUST_X) += K·FORM_YAW_K`（仅矩阵 0），其中驱动量 $K$ 对从机取 $\max(\mathrm{side\_sign}\cdot\tan\phi_{tgt},0)$、对主机取 $\mathrm{FORM\_MSTR\_YAW\_SC}\cdot|\tan\phi_{tgt}|$，$\phi_{tgt}$ 由 CA 订阅 `vehicle_attitude_setpoint` 反解。
+4. **ControlAllocator 编队混控**（对应 §4，驱动量与 §4 相同为 $\tau_z$，裁决记录见 §9.5b ③）：滚→俯混控 `c(PITCH) += c(ROLL)·CA_RLL2PIT_K·side_sign`（从机、两矩阵均生效）；转弯增推 `c(THRUST_X) += drive·FORM_YAW_K`（仅矩阵 0），其中驱动量 $drive$ 对从机取 $\max(\mathrm{side\_sign}\cdot\tau_z,\,0)$、对主机取 $\mathrm{FORM\_MSTR\_YAW\_SC}\cdot|\tau_z|$，$\tau_z$ 即分配器控制向量中的偏航力矩分量（`control_sp(YAW)`），无新增订阅。
 5. **从机偏航通道**：`fw_att_control` 新增 `FW_FORM_YAW_EN` 门控的偏航速率注入（方案 A，见 §9.5b ②）。
 
 > **参数放置**：`FORM_FOLLOWER_EN`、`FORM_POSITION`、`FORM_ROLL_LIM`、`FORM_HINGE_K`、`FORM_YAW_K`、`FORM_MSTR_YAW_SC` 统一定义于 `src/drivers/uavcan/uavcan_params.yaml` 的 `Formation Control` 组；`CA_RLL2PIT_K` 定义于 `src/modules/control_allocator/module.yaml`；`FW_FORM_YAW_EN` 定义于 `src/modules/fw_att_control/fw_att_control_params.yaml`（就近于其消费模块，避免依赖倒置）。
