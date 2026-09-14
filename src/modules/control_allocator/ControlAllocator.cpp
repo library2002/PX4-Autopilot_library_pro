@@ -425,6 +425,12 @@ ControlAllocator::Run()
 			}
 		}
 
+		// Chain-wing formation mixing (see apply_formation_mixing). Applied before
+		// the preflight overrides so that an actuator test still wins.
+		for (int i = 0; i < _num_control_allocation; ++i) {
+			apply_formation_mixing(c[i], i);
+		}
+
 		_actuator_group_preflight_check.applyOverrides(c, _is_vtol, *_actuator_effectiveness);
 
 		for (int i = 0; i < _num_control_allocation; ++i) {
@@ -710,6 +716,94 @@ ControlAllocator::get_ice_shedding_output(hrt_abstime now)
 		const float ice_shedding_output = elapsed_in_period < ICE_SHEDDING_ON_SEC ? ICE_SHEDDING_OUTPUT : 0.0f;
 
 		return ice_shedding_output;
+	}
+}
+
+float
+ControlAllocator::formation_side_sign() const
+{
+	// FORM_POSITION: 0 = CENTER, 1 = LEFT, 2 = RIGHT
+	switch (_param_form_position.get()) {
+	case 1:
+		return 1.f;
+
+	case 2:
+		return -1.f;
+
+	default:
+		return 0.f;
+	}
+}
+
+void
+ControlAllocator::apply_formation_mixing(matrix::Vector<float, NUM_AXES> &control_sp, int matrix_index)
+{
+	const bool follower = _param_form_follower_en.get() != 0;
+	const float side_sign = formation_side_sign();
+
+	// Roll -> pitch mixing (wingtip followers with a defined side only).
+	//
+	// When the wingtip hinge changes the relative roll, the follower center of
+	// mass traces an arc of height z_f = -+ l*sin(delta) and needs a normal
+	// force to follow it. The ailerons can only produce a moment, not a center
+	// of mass normal acceleration, so the elevator has to generate the lift by
+	// changing the angle of attack. The parasitic pitch moment transmitted
+	// through the hinge is a smaller term of the same sign. Both are mirrored
+	// between the two sides, hence side_sign.
+	if (follower && fabsf(side_sign) > FLT_EPSILON) {
+		const float roll_to_pitch = _param_ca_rll2pit_k.get();
+
+		if (fabsf(roll_to_pitch) > FLT_EPSILON) {
+			control_sp(ActuatorEffectiveness::PITCH) = math::constrain(
+						control_sp(ActuatorEffectiveness::PITCH)
+						+ control_sp(ActuatorEffectiveness::ROLL) * roll_to_pitch * side_sign,
+						-1.f, 1.f);
+		}
+	}
+
+	// Yaw throttle boost. The motors always live in allocation 0.
+	//
+	// The driver is the yaw control demand (the yaw torque setpoint), not the
+	// bank angle. The demand is what is non-zero when yaw authority is actually
+	// needed, which includes the roll-in and roll-out transients and any
+	// pilot-flown yaw rate, and it keeps the boost alive while the aircraft is
+	// passing through zero bank. A bank-driven boost would vanish exactly at the
+	// moments of largest adverse yaw and would give no yaw authority at all in
+	// level flight.
+	//
+	// The boost is deliberately one-sided: the inner wing is never slowed down,
+	// so that it keeps its airspeed and therefore its lift. The assembly speeds
+	// up a little instead, which is the accepted trade-off. That also makes the
+	// mixing non-differentiable at zero yaw demand, which the anti-windup design
+	// has to know about.
+	if (matrix_index == 0) {
+		const float yaw_gain = _param_form_yaw_k.get();
+
+		if (yaw_gain > FLT_EPSILON) {
+			const float yaw_demand = control_sp(ActuatorEffectiveness::YAW);
+			float drive = 0.f;
+
+			if (follower && fabsf(side_sign) > FLT_EPSILON) {
+				// With the body z axis pointing down, a positive yaw torque is a
+				// right turn and the outer wing of a right turn is the left one, so
+				// side_sign * yaw_demand is positive on the outer wing only.
+				drive = math::max(side_sign * yaw_demand, 0.f);
+
+			} else if (!follower) {
+				// Center body: a configurable fraction of the wingtip boost, to speed
+				// the whole assembly up rather than slow the inner wing down. The
+				// center body boost adds no yaw moment of its own (its thrust acts
+				// along the body x axis through its own center of mass), so this is
+				// purely an energy management choice.
+				drive = _param_form_master_yaw_scale.get() * fabsf(yaw_demand);
+			}
+
+			if (drive > FLT_EPSILON) {
+				control_sp(ActuatorEffectiveness::THRUST_X) = math::constrain(
+							control_sp(ActuatorEffectiveness::THRUST_X) + drive * yaw_gain,
+							-1.f, 1.f);
+			}
+		}
 	}
 }
 

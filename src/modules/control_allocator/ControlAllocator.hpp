@@ -154,6 +154,21 @@ private:
 
 	float get_ice_shedding_output(hrt_abstime now);
 
+	/**
+	 * Apply the chain-wing formation mixing to one control setpoint vector.
+	 *
+	 * Active for wingtip followers (FORM_FOLLOWER_EN) that have a defined side
+	 * (FORM_POSITION LEFT/RIGHT), and for the center body when FORM_MSTR_YAW_SC
+	 * is non-zero. See the implementation for the terms.
+	 */
+	void apply_formation_mixing(matrix::Vector<float, NUM_AXES> &control_sp, int matrix_index);
+
+	/**
+	 * Signed lateral position of this vehicle in the chain-wing assembly:
+	 * +1 for LEFT, -1 for RIGHT, 0 for CENTER.
+	 */
+	float formation_side_sign() const;
+
 	AllocationMethod _allocation_method_id{AllocationMethod::NONE};
 	ControlAllocation *_control_allocation[ActuatorEffectiveness::MAX_NUM_MATRICES] {}; 	///< class for control allocation calculations
 	int _num_control_allocation{0};
@@ -252,7 +267,13 @@ private:
 		(ParamInt<px4::params::CA_FAILURE_MODE>) _param_ca_failure_mode,
 		(ParamInt<px4::params::CA_R_REV>) _param_r_rev,
 		(ParamFloat<px4::params::CA_REV_THR_FRAC>) _param_ca_rev_thr_frac,
-		(ParamFloat<px4::params::CA_ICE_PERIOD>) _param_ice_shedding_period
+		(ParamFloat<px4::params::CA_ICE_PERIOD>) _param_ice_shedding_period,
+
+		(ParamInt<px4::params::FORM_FOLLOWER_EN>) _param_form_follower_en,
+		(ParamInt<px4::params::FORM_POSITION>) _param_form_position,
+		(ParamFloat<px4::params::FORM_YAW_K>) _param_form_yaw_k,
+		(ParamFloat<px4::params::FORM_MSTR_YAW_SC>) _param_form_master_yaw_scale,
+		(ParamFloat<px4::params::CA_RLL2PIT_K>) _param_ca_rll2pit_k
 	)
 
 };

@@ -650,6 +650,26 @@ parameters:
             min: 0.0
             default: 0.0
 
+    - group: Formation
+      definitions:
+        CA_RLL2PIT_K:
+            description:
+                short: Chain-wing roll to pitch mixing gain
+                long: |
+                  Mixes a fraction of the roll control demand into the pitch channel of
+                  the wingtip followers of a chain-wing aircraft. It is meant to supply
+                  the normal force required to follow the height arc traced when the
+                  wingtip hinge changes the relative roll (dominant term), plus the
+                  parasitic hinge pitch moment (secondary term). The mixing is mirrored
+                  by the follower side, so it only applies when FORM_FOLLOWER_EN is set
+                  and FORM_POSITION is LEFT or RIGHT.
+            type: float
+            decimal: 3
+            increment: 0.05
+            min: -2.0
+            max: 2.0
+            default: 0.0
+
 # Mixer
 mixer:
     actuator_types:
