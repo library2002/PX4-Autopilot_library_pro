@@ -41,11 +41,20 @@ if DRIVERS_UAVCAN
         # controller parameters (FW_MAN_YR_MAX, FW_Y_RMAX) so that the
         # transmitted command reproduces the master's own result exactly. Those
         # parameters only exist when the fixed-wing module is in the build.
+        #
+        # The shared formation role parameters (FORM_FOLLOWER_EN, FORM_POSITION)
+        # are defined next to their primary consumer, the ControlAllocator, so
+        # that the dependency points from the optional UAVCAN module to the
+        # required ControlAllocator and not the other way round.
         depends on MODULES_FW_ATT_CONTROL
+        depends on MODULES_CONTROL_ALLOCATOR
 
     config UAVCAN_FORMATION_BRIDGE
         bool "Include chain-wing formation follower bridge"
         default y
+        # Reads the shared role parameters (FORM_FOLLOWER_EN, FORM_POSITION)
+        # defined by the ControlAllocator; see UAVCAN_FORMATION_CONTROLLER.
+        depends on MODULES_CONTROL_ALLOCATOR
 
     config UAVCAN_SENSOR_ACCEL
         bool "Subscribe to IMU:                         uavcan::equipment::ahrs::RawIMU"

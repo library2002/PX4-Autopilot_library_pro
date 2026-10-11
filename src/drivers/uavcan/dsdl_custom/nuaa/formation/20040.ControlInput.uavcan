@@ -1,25 +1,36 @@
 #
 # Formation ControlInput
 #
-# Chain-wing UAV master (center body) -> follower link, broadcast over DroneCAN.
+# Chain-wing UAV formation link, broadcast over DroneCAN (DTID 20040).
+#
+# Every station that has a downstream neighbour broadcasts this message: the
+# center body (master) through FormationRatesSender, and each inner follower
+# through the relay path of FormationRatesBridge. The message separates the
+# *assembly base attitude*, which is produced by the master and passed through
+# unchanged along the chain, from the *sender's own desired roll rate*, which
+# drives the receiver's hinge correction. That separation keeps the hinge
+# corrections of successive layers from stacking.
 #
 # IMPORTANT: all angular quantities are in radians (rad, rad/s) and carry
-# *setpoints*, NOT normalized stick / raw control inputs. This is the actual
-# data semantics loaded by the master sender; keep this comment in sync with
-# the implementation (a stale comment here was a known issue in the previous
-# code base).
+# *setpoints*, NOT normalized stick / raw control inputs. Keep this comment in
+# sync with the implementation (a stale comment here was a known issue in the
+# previous code base).
 #
 
-# Normalized thrust command [0, 1]
+# Normalized thrust command [0, 1] (passed through along the chain)
 float16 thrust
 
-# Master pitch angle setpoint [rad]
-float16 pitch
+# Assembly base pitch angle setpoint [rad].
+#
+# Produced by the master and transmitted unchanged by every relaying station
+# (base/correction separation): a receiver always sees the master's original
+# pitch as its base and adds only its own hinge correction.
+float16 base_pitch
 
-# Master yaw rate command [rad/s].
+# Yaw rate command [rad/s] (passed through along the chain).
 #
 # In pilot-flown modes this is the *pilot's yaw intent only* (stick converted
-# with FW_MAN_YR_MAX and clamped with FW_Y_RMAX), NOT the master's full yaw rate
+# with FW_MAN_YR_MAX and clamped with FW_Y_RMAX), NOT the sender's full yaw rate
 # setpoint: the turn coordination feedforward is deliberately excluded, because
 # each aircraft has to compute its own from its own airspeed and bank angle.
 # Sending the sum would double count the feedforward on every follower.
@@ -29,20 +40,42 @@ float16 pitch
 # currently leaves at zero - followers then turn purely by banking.
 float16 yaw
 
-# Master roll angle setpoint [rad]
-float16 roll_target
-
-# Master *desired* roll rate setpoint [rad/s].
+# Assembly base roll angle setpoint [rad].
 #
-# Feedforward reference for the follower hinge correction. Deliberately the
-# setpoint (vehicle_rates_setpoint.roll), NOT the measured body rate: under an
-# external disturbance the followers must aid the master's corrective *intent*,
-# whereas aiding the measured rate would be a positive feedback on the
-# disturbance. See the version-node design record for the stability argument.
-float16 master_roll_signed_err
+# Same base/correction separation as base_pitch: the master's original roll
+# setpoint, transmitted unchanged by every relaying station.
+float16 base_roll
+
+# Sender's *desired* roll rate setpoint [rad/s].
+#
+# Drives the receiver's hinge correction (pitch offset = side_sign * K_h *
+# roll_rate_ref). For the master this is its own vehicle_rates_setpoint.roll;
+# for a relaying inner follower it is that follower's own desired roll rate,
+# so the outer pair corrects against its immediate neighbour instead of
+# stacking the inner layer's correction.
+#
+# Deliberately the setpoint (vehicle_rates_setpoint.roll), NOT the measured
+# body rate: under an external disturbance the receivers must aid the
+# sender's corrective *intent*, whereas aiding the measured rate would be a
+# positive feedback on the disturbance. See the version-node design record
+# for the stability argument.
+float16 roll_rate_ref
 
 # Validity flag bit definitions
 uint8 FLAG_VALID = 1
 
 # Validity bitmask, see the FLAG_* constants above
 uint8 flags
+
+# Source station identifier: (side << 4) | layer.
+#
+# side: 0 = CENTER, 1 = LEFT, 2 = RIGHT.
+# layer: 0 = center body, 1..N = distance from the center along that side.
+#   0x00 = center (master)   0x11 = inner left   0x12 = outer left
+#   0x21 = inner right       0x22 = outer right
+#
+# A receiver accepts a command only if the source equals its immediate
+# upstream station (see FORM_LAYER / FORM_LAYERS): the bus is shared between
+# all stations, so this field is what keeps an outer follower from acting on
+# the master's broadcast.
+uint8 source

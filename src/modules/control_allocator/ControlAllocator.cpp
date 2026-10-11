@@ -741,15 +741,12 @@ ControlAllocator::apply_formation_mixing(matrix::Vector<float, NUM_AXES> &contro
 	const bool follower = _param_form_follower_en.get() != 0;
 	const float side_sign = formation_side_sign();
 
-	// Roll -> pitch mixing (wingtip followers with a defined side only).
+	// 滚转→俯仰混控（仅对有明确侧别的翼尖从机生效）。
 	//
-	// When the wingtip hinge changes the relative roll, the follower center of
-	// mass traces an arc of height z_f = -+ l*sin(delta) and needs a normal
-	// force to follow it. The ailerons can only produce a moment, not a center
-	// of mass normal acceleration, so the elevator has to generate the lift by
-	// changing the angle of attack. The parasitic pitch moment transmitted
-	// through the hinge is a smaller term of the same sign. Both are mirrored
-	// between the two sides, hence side_sign.
+	// 翼尖铰链改变相对滚转时，从机质心沿高度弧线 z_f = -+ l*sin(delta) 运动，
+	// 需要法向力来跟随。副翼只能产生力矩、无法直接提供质心法向加速度，
+	// 因此必须由升降舵改变迎角来产生升力。铰链传递的寄生俯仰力矩是同符号的
+	// 较小项。左右两侧符号相反（镜像几何），故乘 side_sign。
 	if (follower && fabsf(side_sign) > FLT_EPSILON) {
 		const float roll_to_pitch = _param_ca_rll2pit_k.get();
 
@@ -761,21 +758,16 @@ ControlAllocator::apply_formation_mixing(matrix::Vector<float, NUM_AXES> &contro
 		}
 	}
 
-	// Yaw throttle boost. The motors always live in allocation 0.
+	// 偏航增推。电机始终在分配矩阵 0 中生效。
 	//
-	// The driver is the yaw control demand (the yaw torque setpoint), not the
-	// bank angle. The demand is what is non-zero when yaw authority is actually
-	// needed, which includes the roll-in and roll-out transients and any
-	// pilot-flown yaw rate, and it keeps the boost alive while the aircraft is
-	// passing through zero bank. A bank-driven boost would vanish exactly at the
-	// moments of largest adverse yaw and would give no yaw authority at all in
-	// level flight.
+	// 驱动量是偏航控制需求（偏航力矩设定点），而非坡度角。偏航需求在真正
+	// 需要偏航权限时才非零——包括滚转进入/改出瞬态和任何驾驶员蹬杆偏航率——
+	// 并且在飞机过零坡度时仍保持增推。若用坡度驱动，恰好在逆偏航最大时
+	// 增推消失，平飞带偏航率指令时完全无输出。
 	//
-	// The boost is deliberately one-sided: the inner wing is never slowed down,
-	// so that it keeps its airspeed and therefore its lift. The assembly speeds
-	// up a little instead, which is the accepted trade-off. That also makes the
-	// mixing non-differentiable at zero yaw demand, which the anti-windup design
-	// has to know about.
+	// 增推为单侧设计：内侧机从不减速，以保持空速和升力。装配体整体略微
+	// 加速，这是可接受的代价。这使得混控在偏航需求过零处不可微，
+	// 抗积分饱和设计需知晓此特性。
 	if (matrix_index == 0) {
 		const float yaw_gain = _param_form_yaw_k.get();
 
@@ -784,17 +776,14 @@ ControlAllocator::apply_formation_mixing(matrix::Vector<float, NUM_AXES> &contro
 			float drive = 0.f;
 
 			if (follower && fabsf(side_sign) > FLT_EPSILON) {
-				// With the body z axis pointing down, a positive yaw torque is a
-				// right turn and the outer wing of a right turn is the left one, so
-				// side_sign * yaw_demand is positive on the outer wing only.
+				// body 系 z 轴向下，偏航力矩为正即右转，右转的外侧机是左机，
+				// 故 side_sign * yaw_demand 仅在外侧机为正。
 				drive = math::max(side_sign * yaw_demand, 0.f);
 
 			} else if (!follower) {
-				// Center body: a configurable fraction of the wingtip boost, to speed
-				// the whole assembly up rather than slow the inner wing down. The
-				// center body boost adds no yaw moment of its own (its thrust acts
-				// along the body x axis through its own center of mass), so this is
-				// purely an energy management choice.
+				// 中心体（主机）：按可配置比例施加从机增推量，使装配体整体加速
+				// 而非让内侧机减速。主机增推不产生偏航力矩（推力沿 body x 轴
+				// 过自身质心），纯属能量管理策略。
 				drive = _param_form_master_yaw_scale.get() * fabsf(yaw_demand);
 			}
 

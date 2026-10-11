@@ -43,6 +43,15 @@
 #include <px4_platform_common/defines.h>
 
 
+namespace
+{
+// Source station identifier of the center body: (side << 4) | layer with side
+// CENTER = 0 and layer 0. The sender *is* the center body by construction, so
+// this is a constant rather than something derived from FORM_POSITION.
+constexpr uint8_t SOURCE_CENTER = 0x00;
+} // namespace
+
+
 FormationRatesSender::FormationRatesSender(uavcan::INode &node) :
 	ModuleParams(nullptr),
 	_timer(node),
@@ -160,19 +169,23 @@ void FormationRatesSender::periodic_update(const uavcan::TimerEvent &)
 		}
 	}
 
-	nuaa::formation::ControlInput msg{};
+	nuaa::formation::ControlInput control_input{};
 
-	msg.thrust = math::constrain(attitude_setpoint.thrust_body[0], 0.f, 1.f);
-	msg.pitch = euler.theta();
-	msg.roll_target = euler.phi();
-	msg.yaw = yaw_rate;
+	control_input.thrust = math::constrain(attitude_setpoint.thrust_body[0], 0.f, 1.f);
+	control_input.base_pitch = euler.theta();
+	control_input.base_roll = euler.phi();
+	control_input.yaw = yaw_rate;
 
-	// Hinge-correction feedforward reference: the master *desired* roll rate.
-	// Deliberately the setpoint, not the measured body rate - see the DSDL
-	// field comment for the stability argument.
-	msg.master_roll_signed_err = rates_setpoint.roll;
+	// Hinge-correction feedforward reference: this master's *desired* roll
+	// rate. Deliberately the setpoint, not the measured body rate - see the
+	// DSDL field comment for the stability argument.
+	control_input.roll_rate_ref = rates_setpoint.roll;
 
-	msg.flags = nuaa::formation::ControlInput::FLAG_VALID;
+	// Source station: this sender is the center body by construction, see the
+	// DSDL field comment for the encoding.
+	control_input.source = SOURCE_CENTER;
 
-	(void)_control_input_pub.broadcast(msg);
+	control_input.flags = nuaa::formation::ControlInput::FLAG_VALID;
+
+	(void)_control_input_pub.broadcast(control_input);
 }

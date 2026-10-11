@@ -37,8 +37,11 @@
  * Chain-wing formation link, master (center body) side.
  *
  * Broadcasts nuaa.formation.ControlInput (DroneCAN, DTID 20040) to the wingtip
- * followers. The message carries the master attitude/thrust setpoints plus the
- * hinge-correction feedforward reference.
+ * followers. The message carries the assembly base attitude (this master's
+ * attitude setpoint), the master's own desired roll rate as the
+ * hinge-correction feedforward reference, and the source station identifier.
+ * An inner follower that has a downstream neighbour relays the message
+ * onwards from FormationRatesBridge instead of this class.
  *
  * Only a master broadcasts: the sender stays silent when FORM_FOLLOWER_EN is
  * set, so no role handshaking is required on the bus.

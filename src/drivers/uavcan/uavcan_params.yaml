@@ -297,37 +297,6 @@ parameters:
       reboot_required: true
 - group: Formation Control
   definitions:
-    FORM_FOLLOWER_EN:
-      description:
-        short: Chain-wing formation role
-        long: |-
-          Selects the chain-wing formation role of this vehicle.
-          0 - Master (center body): broadcasts nuaa.formation.ControlInput to
-              the wingtip followers.
-          1 - Follower (wingtip body): receives ControlInput and tracks the
-              master setpoints.
-          All formation parameters share the FORM_ prefix and are used by the
-          UAVCAN formation link and by the ControlAllocator.
-      type: boolean
-      default: 0
-      reboot_required: true
-    FORM_POSITION:
-      description:
-        short: Chain-wing formation position
-        long: |-
-          Physical position of this vehicle in the chain-wing assembly. Sets
-          side_sign to +1 (LEFT), -1 (RIGHT) or 0 (CENTER), which drives the
-          follower hinge correction direction and the ControlAllocator mixing.
-          The CENTER body does not apply any hinge correction.
-      type: enum
-      values:
-        0: CENTER
-        1: LEFT
-        2: RIGHT
-      default: 0
-      min: 0
-      max: 2
-      reboot_required: true
     FORM_ROLL_LIM:
       description:
         short: Chain-wing roll/pitch setpoint limit
@@ -347,44 +316,61 @@ parameters:
         short: Chain-wing hinge correction gain
         long: |-
           Gain of the follower hinge correction. The follower pitch setpoint is
-          offset by side_sign * FORM_HINGE_K * (master desired roll rate), so
-          the gain has units of time.
+          offset by side_sign * FORM_HINGE_K * roll_rate_ref, where
+          roll_rate_ref is the immediate upstream station's *desired* roll
+          rate; the gain therefore has units of time. The base attitude itself
+          is passed through unchanged along the chain (base/correction
+          separation).
       type: float
       default: 1.0
       min: 0.0
       max: 5.0
       unit: s
       decimal: 3
-    FORM_YAW_K:
+    FORM_LINK_LOSS_T:
       description:
-        short: Chain-wing yaw throttle boost gain
+        short: Formation link loss keep-alive timeout
         long: |-
-          Gain of the yaw throttle boost applied by the control allocator. The
-          boost compensates the yaw authority lost when several bodies are linked
-          together (the assembly yaw inertia grows much faster than the rudder
-          authority), by adding thrust to the wing that is on the outside of the
-          turn. The driver is the yaw control demand, so the boost is active
-          whenever yaw authority is needed - including the roll-in and roll-out
-          transients and level flight with a yaw rate command - and not only while
-          banked. It is one-sided (max(side_sign * yaw_demand, 0) for the wingtip
-          followers): the inner wing is never slowed down, so that it keeps its
-          lift.
+          Grace window during which the follower keeps the offboard heartbeat
+          alive after the last valid upstream ControlInput was received.
+          Within this window an upstream blackout does not trigger the
+          offboard-loss failsafe and the follower simply holds the last
+          command. Past this window the heartbeat stops and the regular
+          offboard loss failsafe runs (see COM_OBL_RC_ACT). Set to 0 to
+          disable the keep-alive and tie the heartbeat strictly to upstream
+          receptions.
       type: float
-      default: 0.3
+      default: 2.0
       min: 0.0
-      max: 5.0
-      decimal: 3
-    FORM_MSTR_YAW_SC:
+      max: 60.0
+      unit: s
+      decimal: 2
+      increment: 0.5
+    FORM_LAYER:
       description:
-        short: Chain-wing yaw throttle boost scale for the center body
+        short: Chain-wing formation layer
         long: |-
-          Fraction of the wingtip boost that is also applied to the center body
-          during a formation turn. Non-zero deliberately adds thrust to the center
-          body too, which speeds the whole assembly up instead of slowing the inner
-          wing down. Zero disables the center-body boost entirely (and therefore
-          leaves a standalone fixed-wing unaffected).
-      type: float
-      default: 0.0
-      min: 0.0
-      max: 1.0
-      decimal: 3
+          This vehicle's distance from the center body along its side
+          (0 = center body, 1 = inner follower, 2 = outer follower, ...).
+          Together with FORM_LAYERS it decides two things: whether this
+          vehicle relays an accepted upstream command to the next station
+          downstream (layer < FORM_LAYERS), and which source station
+          identifier a received command must carry - layer 1 expects the
+          center body (source 0x00), deeper layers expect the same side one
+          layer closer to the center.
+      type: int32
+      default: 1
+      min: 0
+      max: 7
+    FORM_LAYERS:
+      description:
+        short: Chain-wing layers per side
+        long: |-
+          Number of follower layers per side (1 = three-body formation with
+          one follower per side, 2 = five-body formation with inner and outer
+          followers, ...). The outermost station of a side (layer ==
+          FORM_LAYERS) does not relay.
+      type: int32
+      default: 1
+      min: 1
+      max: 7
