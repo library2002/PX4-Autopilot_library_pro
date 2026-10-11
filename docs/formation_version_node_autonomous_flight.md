@@ -3,7 +3,7 @@
 ## 1. 记录目的
 
 - 将本版代码固化为一个**版本节点**，作为链翼编队飞行研究过程中的里程碑存档，便于后续回溯、对比与恢复。
-- 代码基线：提交 `b65802c8cc`（autonomous flight），并包含工作区未提交的 `FORM_YAW_K` 参数范围调整（`@max` 由 3.0 放宽至 5.0，`@decimal` 由 2 提升至 3）。
+- 代码基线：提交链 `e996699851`（feat(uavcan): 主机发送端与从机桥）→ `dbc91bcb0b`（feat(control_allocator): 编队混控）→ `8eae6af822`（feat(fw_att_control): 从机偏航速率通道）→ `5dce26f1df`（本版本节点文档）→ `c1c51e2956`（docs: 增推驱动量裁决为 τ_z），并包含工作区未提交的参数迁移（`FORM_*` 由 `uavcan_params.yaml` 迁至 `control_allocator/module.yaml`）与命名统一（`msg` → `control_input`、`side_sign()` → `formation_side_sign()`）。
 - 记录本阶段已验证与未验证的功能边界，为下一阶段（控制律调整、试飞验证等）提供参照。
 
 ## 2. 具体内容
@@ -20,7 +20,7 @@
   FormationRatesSender::periodic_update()          ← 定时器 300 Hz
       │  封装
       ▼
-  dronecan::formation::ControlInput（广播）        ← 发出（从机侧接收）
+  nuaa::formation::ControlInput（广播）             ← 发出（从机侧接收）
 ```
 
 ### 2.2 主机调用的指令（输入端）
@@ -28,17 +28,17 @@
 | uORB 主题 | 用到的字段 | 用途 |
 | ---- | ---- | ---- |
 | `vehicle_status` | `vehicle_type`、`in_transition_mode` | 发送门控：仅固定翼或过渡模式发送 |
-| `vehicle_status` | `nav_state` | 偏航指令数据源选择（手动姿态模式 vs 自主模式） |
+| `vehicle_control_mode` | `flag_control_manual_enabled` | 偏航指令数据源选择（手动 vs 自主；与固定翼控制器同源判据，见 2.4 节） |
 | `vehicle_attitude_setpoint` | `q_d`（四元数） | 反解欧拉角，得到主机滚转角设定 `roll_target`、俯仰角设定 `pitch` |
 | `vehicle_attitude_setpoint` | `yaw_sp_move_rate` | 自主模式的偏航指令源 |
 | `vehicle_attitude_setpoint` | `thrust_body[0]` | 主机推力指令，clamp 到 `[0, 1]` |
 | `vehicle_attitude_setpoint` | `timestamp` | 新鲜度门控：超过 500 ms 不发送 |
-| `vehicle_rates_setpoint` | `yaw` | 手动姿态模式的偏航指令源（含操纵杆偏航输入） |
+| `manual_control_setpoint` | `yaw` | 手动模式的偏航指令源（驾驶员偏航杆量，经 `FW_MAN_YR_MAX` 换算、`FW_Y_RMAX` 限幅，见 2.4 节） |
 | `vehicle_rates_setpoint` | `roll` | 主机**期望**滚转角速率（设定点），作为铰链修正参考量 |
 
 ### 2.3 发出的指令（输出端）：ControlInput
 
-消息定义：`src/drivers/uavcan/dsdl_custom/dronecan/formation/20040.ControlInput.uavcan`（Message ID 20040），以 300 Hz 广播。
+消息定义：`src/drivers/uavcan/dsdl_custom/nuaa/formation/20040.ControlInput.uavcan`（Message ID 20040），以 300 Hz 广播。
 
 | 字段 | 类型 | 本版代码实际装载的数据源 | 物理含义 |
 | ---- | ---- | ---- | ---- |
@@ -52,14 +52,20 @@
 ### 2.4 关键逻辑：偏航指令数据源切换
 
 ```text
-nav_state ∈ {MANUAL, STAB, ACRO, ALTCTL, POSCTL}（主机处于人工姿态操纵）
-  → 使用 rates.yaw（操纵杆偏航已折算在内）
+flag_control_manual_enabled == true（主机处于人工操纵）
+  → 读 manual_control_setpoint.yaw（驾驶员杆量），
+    经 FW_MAN_YR_MAX 换算为角速率、按 FW_Y_RMAX 限幅后发送
+    （只发杆量意图，不含协调转弯前馈，见下）
 否则（AUTO / MISSION / OFFBOARD 等自主/半自主模式）
-  → 使用 att_sp.yaw_sp_move_rate（导航解算的偏航速率）
-异常回退：优先值非有限时 → rates.yaw → 0.0
+  → 使用 att_sp.yaw_sp_move_rate（导航解算的偏航速率；
+    固定翼栈当前无写入者，实际为 0，从机纯靠坡度转弯）
+异常回退：自主分支值非有限时 → 0.0（不回退到 rates.yaw，
+  因其本质是协调转弯前馈，转发会造成从机双计前馈）
 ```
 
-**问题背景**：手动模式下 `fw_att_control::vehicle_manual_poll()` 发布的 `vehicle_attitude_setpoint.yaw_sp_move_rate` 保持零初始化值（`0.0f` 是有限值，`PX4_ISFINITE()` 检查会**误通过**），若不做显式的 `nav_state` 判断，将使用恒为零的偏航指令而非真正的操纵杆偏航输入。
+**判据选择**：用 `flag_control_manual_enabled` 而非 `nav_state` 枚举列表——这正是固定翼控制器（`fw_att_control` / `fw_rate_control`）决定"杆量是否进入速率设定点"的同源判据，构造上不会随 `nav_state` 重新编号或新增人工模式而漂移。
+
+**问题背景**：手动模式下 `fw_att_control::vehicle_manual_poll()` 发布的 `vehicle_attitude_setpoint.yaw_sp_move_rate` 保持零初始化值（`0.0f` 是有限值，`PX4_ISFINITE()` 检查会**误通过**），若不做显式的手动/自主判据，将使用恒为零的偏航指令而非真正的操纵杆偏航输入。
 
 **物理意义**：主机在人工操纵与自主飞行两种状态下，偏航指令的"权威"来源不同——前者源于驾驶员操纵杆，后者源于导航/制导外环，必须显式区分，否则从机收到的偏航指令在人机切换瞬间会错误归零。
 
@@ -67,9 +73,12 @@ nav_state ∈ {MANUAL, STAB, ACRO, ALTCTL, POSCTL}（主机处于人工姿态操
 
 定期回调中同时满足以下条件才广播：
 
-1. `vehicle_type == VEHICLE_TYPE_FIXED_WING`，或 `in_transition_mode == true`；
-2. `vehicle_attitude_setpoint.timestamp` 距今不超过 500 ms；
-3. 定时器周期 `1000000 / MAX_RATE_HZ` = 300 Hz。
+1. `FORM_FOLLOWER_EN == 0`（本机为主机；从机必须静默）；
+2. `vehicle_status`、`vehicle_control_mode`、`vehicle_attitude_setpoint`、`vehicle_rates_setpoint` 四路订阅均拷贝成功；
+3. `vehicle_type == VEHICLE_TYPE_FIXED_WING`，或 `in_transition_mode == true`；
+4. `vehicle_attitude_setpoint.timestamp` 距今不超过 500 ms；
+5. `q_d` 各分量有限；
+6. 定时器周期 `1000000 / MAX_RATE_HZ` = 300 Hz。
 
 ### 2.6 结论：DSDL 注释与代码的语义漂移
 
@@ -94,7 +103,7 @@ nav_state ∈ {MANUAL, STAB, ACRO, ALTCTL, POSCTL}（主机处于人工姿态操
 
 ### 3.1 定位与目的
 
-本节记录从机侧 UAVCAN 接收器 `FormationRatesBridge`（`src/drivers/uavcan/sensors/formation_rates.{hpp,cpp}`）。
+本节记录从机侧 UAVCAN 接收器 `FormationRatesBridge`（`src/drivers/uavcan/formation_rates_bridge.{hpp,cpp}`）。
 
 **目的**：从机接收主机广播的 `ControlInput`，**结合主机传来的指令（姿态设定、偏航速率、铰链修正量）与从机自身当前姿态**，在本机解算出"从机该如何运动"，并以本地姿态设定（`vehicle_attitude_setpoint`）的形式下发执行，实现链翼编队的协同运动。
 
@@ -102,7 +111,7 @@ nav_state ∈ {MANUAL, STAB, ACRO, ALTCTL, POSCTL}（主机处于人工姿态操
 主机广播 ControlInput
       │  UAVCAN
       ▼
-FormationRatesBridge::formation_rates_sub_cb()
+FormationRatesBridge::control_input_sub_cb()
       │  读取：vehicle_attitude（保持从机自身航向 self_yaw）
       │        vehicle_status（Offboard 模式门控）
       │        编队参数 FORM_POSITION / FORM_HINGE_K / FORM_ROLL_LIM
@@ -125,7 +134,7 @@ FormationRatesBridge::formation_rates_sub_cb()
 | UAVCAN `ControlInput` | `flags` | `FLAG_VALID` 有效性检查 |
 | uORB `vehicle_attitude` | `q`（四元数） | 反解从机自身当前偏航 `self_yaw`，用于保持航向 |
 | uORB `vehicle_status` | `nav_state` | 仅 `OFFBOARD` 状态发布姿态设定 |
-| uORB `parameter_update` | — | 参数热更新，限频 1 s |
+| uORB `parameter_update` | — | 参数热更新：收到 `ControlInput` 且该主题已更新时调用 `updateParams()`，使增益可免重启调参 |
 | 参数 `FORM_FOLLOWER_EN` | 0/1 | 从机模式总开关 |
 | 参数 `FORM_POSITION` | 0/1/2 | 编队位置：0=CENTER，1=LEFT，2=RIGHT |
 | 参数 `FORM_ROLL_LIM` | deg（默认 45） | 滚转/俯仰角限幅 |
@@ -135,10 +144,10 @@ FormationRatesBridge::formation_rates_sub_cb()
 
 **位置符号**：`side_sign` 由编队位置决定——LEFT 为 $+1$，RIGHT 为 $-1$，CENTER 为 $0$（中心位置不做铰链修正）。
 
-**① 滚转设定**（跟随主机，限幅）：
+**① 滚转设定**（以主机设定为姿态基准，限幅）：
 
 $$
-\phi_{sp} = \mathrm{clip}\left(\phi_{tgt},\; -\delta_{lim},\; +\delta_{lim}\right), \qquad \delta_{lim} = \mathrm{FORM\_ROLL\_LIM}\ (\mathrm{rad})
+\phi_{sp} = \mathrm{clip}\left(\phi_{tgt},\; -\delta_{lim},\; +\delta_{lim}\right), \qquad \delta_{lim} = \mathrm{deg2rad}\left(\mathrm{FORM\_ROLL\_LIM}\right)
 $$
 
 **② 俯仰设定**（主机俯仰 + 铰链修正）：
@@ -149,7 +158,7 @@ $$
 
 其中 $p_{sp}^{master}$ 即 `master_roll_signed_err`（主机期望滚转角速率）。
 
-**③ 偏航**：四元数设定中的偏航角固定为**从机自身当前航向** $\psi_{sp}=\psi_{self}$（航向保持）；偏航运动通过 `yaw_sp_move_rate = msg.yaw` 单独注入。
+**③ 偏航**：四元数设定中的偏航角固定为**从机自身当前航向** $\psi_{sp}=\psi_{self}$（航向保持）；偏航运动通过 `yaw_sp_move_rate = control_input.yaw` 单独注入。
 
 **④ 推力**：`thrust_body[0]` 直接透传主机推力（偏航增推逻辑已移至 ControlAllocator 处理）。
 
@@ -169,46 +178,54 @@ $$
 | 字段 | 值 |
 | ---- | ---- |
 | `q_d` | `Eulerf(roll_sp, pitch_sp, self_yaw)` |
-| `yaw_sp_move_rate` | `msg.yaw`（偏航速率指令） |
+| `yaw_sp_move_rate` | `control_input.yaw`（偏航速率指令） |
 | `thrust_body` | `[base_thrust, 0, 0]` |
 
 ### 3.5 存留事项：从机侧代码的注释/命名遗留
 
-1. ✅ **`FORM_ROLL_LIM` 命名与用途不符**：参数名含 "rate"，实际用作**角度**限幅。已修正 `uavcan_params.c` 中该参数的描述注释（注明实际限幅对象及保留旧名的原因）；**参数名本身未改**，以免破坏 QGC 参数配置兼容。
+1. ✅ **`FORM_ROLL_LIM` 命名与用途不符**：参数名含 "rate"，实际用作**角度**限幅。已修正 `uavcan_params.yaml` 中该参数的描述注释（注明实际限幅对象及保留旧名的原因）；**参数名本身未改**，以免破坏 QGC 参数配置兼容。
 2. ✅ **hpp 类注释过时**：已修正 `FormationRatesBridge` 的 `@brief`，改为发布 `vehicle_attitude_setpoint`（attitude 模式）+ `offboard_control_mode`。
-3. ✅ **cpp 内注释不完整**：`msg.yaw` 处注释已改为说明双数据源（手动 `rates_setpoint.yaw` / 自主 `yaw_sp_move_rate`）；滚转设定处"遥控指令"表述一并修正为"主机滚转角设定"。
-4. **跨机型一致性（待验证）**：`attitude=true, body_rate=false` 模式下 `yaw_sp_move_rate` 的前馈作用，注释提示 mc_att_control 可使用、fw_att_control 需配合补丁，本版代码中固定翼从机的偏航通道实际生效路径待验证。
+3. ✅ **cpp 内注释不完整**：`control_input.yaw` 处注释已改为说明双数据源（手动 `manual_control_setpoint.yaw` 杆量换算 / 自主 `yaw_sp_move_rate`）；滚转设定处"遥控指令"表述一并修正为"主机滚转角设定"。
+4. ✅ **跨机型一致性（已解决）**：`attitude=true, body_rate=false` 模式下 `yaw_sp_move_rate` 的前馈作用——固定翼从机的偏航通道已由 `fw_att_control` 补丁实现（`FW_FORM_YAW_EN` 门控的速率注入，见 §9.5b ②），并经 §6.2 第五条验证通过。
 
 ## 4. 控制分配层：偏航执行与编队混控（ControlAllocator）
 
 ### 4.1 定位
 
-`ControlAllocator`（`src/modules/control_allocator/ControlAllocator.{hpp,cpp}`）订阅 `vehicle_torque_setpoint` / `vehicle_thrust_setpoint`，经执行器有效性矩阵解算出 `actuator_motors` / `actuator_servos`。本版在其中加入了**从机编队定制**：滚转→俯仰混控与偏航增推。由此，第 3 节中提到的"偏航增推已移至 ControlAllocator"在此闭环。
+`ControlAllocator`（`src/modules/control_allocator/ControlAllocator.{hpp,cpp}`）订阅 `vehicle_torque_setpoint` / `vehicle_thrust_setpoint`，经执行器有效性矩阵解算出 `actuator_motors` / `actuator_servos`。本版在其中加入了**链翼编队定制**：滚转→俯仰混控（仅从机）与偏航增推（从机单侧截断、中心体比例增推）。由此，第 3 节中提到的"偏航增推已移至 ControlAllocator"在此闭环。
 
-### 4.2 编队相关参数与内部状态
+### 4.2 编队相关参数
 
-| 参数 | 默认 | 用途 |
+本节的编队逻辑**不维护任何持久化内部状态**：`apply_formation_mixing()` 每个分配周期直接从参数读取；`formation_side_sign()` 是成员**函数**（一次查表换算），同样不是状态。下表列出参数及其在代码中的实际承载者。
+
+| 参数 | 默认 | 用途（含代码中的实际承载者） |
 | ---- | ---- | ---- |
-| `FORM_FOLLOWER_EN` | 0 | 1 表示本机为从机（`_is_follower`，判定容差 1e-3） |
-| `FORM_POSITION` | 0 | `_side_sign`：LEFT=+1，RIGHT=−1，CENTER=0 |
-| `FORM_YAW_K` | 0.3 | 偏航增推增益 `_yaw_throttle_gain` |
-| `CA_RLL2PIT_K` | 0.0 | 滚转→俯仰混控增益 `_roll_to_pitch_mix`（自定义参数，见第 5 节） |
+| `FORM_FOLLOWER_EN` | 0 | 非 0 表示本机为从机；承载者 `_param_form_follower_en`，在混控函数内取为局部量 `follower`（判定为 `!= 0`） |
+| `FORM_POSITION` | 0 | 侧别来源，承载者 `_param_form_position`；由 `formation_side_sign()` 换算：CENTER=0 → 0，LEFT=1 → +1，RIGHT=2 → −1 |
+| `FORM_YAW_K` | 0.3 | 偏航增推增益；承载者 `_param_form_yaw_k`，在混控函数内取为局部量 `yaw_gain` |
+| `FORM_MSTR_YAW_SC` | 0.0 | 中心体（主机）增推比例；承载者 `_param_form_master_yaw_scale`。主机按此比例施加增推量，0 表示主机不参与 |
+| `CA_RLL2PIT_K` | 0.0 | 滚转→俯仰混控增益；承载者 `_param_ca_rll2pit_k`，在混控函数内取为局部量 `roll_to_pitch`（自定义参数，见第 5 节） |
 
 ### 4.3 控制设定向量的合成
 
-分配器控制目标 $c = [\tau_x,\ \tau_y,\ \tau_z,\ T_x,\ T_y,\ T_z]$，从机启用时：
+分配器控制目标 $c = [\tau_x,\ \tau_y,\ \tau_z,\ T_x,\ T_y,\ T_z]$，编队混控启用时（滚转→俯仰仅从机；偏航增推对从机与中心体均生效）：
 
 $$c(1) = \tau_{y,sp} + \underbrace{\tau_{x,sp}\cdot K_{r2p}\cdot \mathrm{side\_sign}}_{\text{滚转→俯仰混控（仅从机）}}$$
 
-$$c(3) = T_{x,sp} + \underbrace{\max\left(\mathrm{side\_sign}\cdot\tau_{z,sp},\ 0\right)\cdot K_{yaw}}_{\text{偏航增推（仅从机，单侧截断）}}$$
+$$c(3) = T_{x,sp} + \Delta T_x, \qquad
+\Delta T_x = \begin{cases}
+\max\left(\mathrm{side\_sign}\cdot\tau_{z,sp},\ 0\right)\cdot K_{yaw} & \text{从机（}\mathrm{side\_sign}\neq 0\text{）}\\[4pt]
+\mathrm{FORM\_MSTR\_YAW\_SC}\cdot\left|\tau_{z,sp}\right|\cdot K_{yaw} & \text{非从机（中心体）}\\[4pt]
+0 & \text{从机且 }\mathrm{side\_sign}= 0\ \text{（POSITION=CENTER）}
+\end{cases}$$
 
 其余分量直接透传设定点。
 
-**偏航增推的符号分析**（body 系 z 轴向下，$\tau_z>0$ 为右转）：左转（$\tau_z<0$）时 `side_sign=−1` 的右机满足 `side_sign·τz>0` → **右机增推**；右转时左机增推。即——**增推的始终是转弯外侧的从机**。
+**偏航增推的符号分析**（body 系 z 轴向下，$\tau_z>0$ 为右转）：左转（$\tau_z<0$）时 `side_sign=−1` 的右机满足 `side_sign·τz>0` → **右机增推**；右转时左机增推。即——**增推的始终是转弯外侧的从机**。中心体（主机）走 `fabsf` 分支：增推量与转向方向**无关**，恒为 $\mathrm{FORM\_MSTR\_YAW\_SC}\cdot|\tau_{z,sp}|\cdot K_{yaw}$。该增推不产生偏航力矩（推力沿 body x 轴且过自身质心），纯粹用于装配体整体能量补偿。
 
 **物理意义**：
 
-- **偏航增推**：编队整体转弯时，外侧从机走大半径圆弧，速度需求高于内侧，必须额外加推力维持队形与空速；增推量与偏航力矩幅值成正比（$|\tau_z|\cdot K_{yaw}$）。单侧截断（只增不减）避免内侧从机动力过剩；这也使控制律在 $\tau_z$ 过零处**不可微、非光滑**，与后续抗积分饱和设计存在交互问题。
+- **偏航增推**：编队整体转弯时，外侧从机走大半径圆弧，速度需求高于内侧，必须额外加推力维持队形与空速；增推量与偏航力矩幅值成正比（$|\tau_z|\cdot K_{yaw}$）。单侧截断（只增不减）避免内侧从机动力过剩，代价是从机推力通道在 $\tau_z$ 过零处**值不连续**（死区型跳变），等效增益随偏航方向跳变；中心体分支用 $|\tau_z|$，过零处值连续但**导数不连续**（折点），等效增益符号反转。两者对后续抗积分饱和设计的影响不同，需分别处理。
 - **滚转→俯仰混控**：机理由两部分组成——**① 几何高度协调（主导）**：从机绕主机相对滚转（上反角 $\delta$ 变化）时，质心高度 $z_f = \mp l\sin\delta$ 随之变化，需要法向力 $m a_z$ 支撑这段圆弧运动；副翼只能产生力矩、不能直接提供质心法向加速度，故必须由升降舵改变迎角产生升力来"喂"高差。② 结构耦合补偿（次要）：翼尖铰链约束传递的寄生俯仰力矩。两效应对左右从机符号相反（镜像几何，`side_sign`）。由于几何项含 $1/\bar{q}$ 依赖，低速工况所需增益更大，全程变速编队时需考虑增益调度。
 
 ### 4.4 偏航控制的完整闭环链路
@@ -216,25 +233,25 @@ $$c(3) = T_{x,sp} + \underbrace{\max\left(\mathrm{side\_sign}\cdot\tau_{z,sp},\ 
 ```text
 主机：驾驶员/导航 → rates.yaw 或 yaw_sp_move_rate → ControlInput.yaw（UAVCAN）
       ▼
-从机：msg.yaw → vehicle_attitude_setpoint.yaw_sp_move_rate
+从机：control_input.yaw → vehicle_attitude_setpoint.yaw_sp_move_rate
       ▼
 从机姿态控制器：跟踪生成 τ_z,sp（vehicle_torque_setpoint）
       ▼
 ControlAllocator：
   ① 常规路径：τ_z 进入分配矩阵 → 电机差速/舵面（直接偏航执行）
-  ② 从机增强：|τ_z|·FORM_YAW_K → 主推力增量（转弯外侧速度补偿）
+  ② 编队增推：从机 max(side_sign·τ_z, 0)·FORM_YAW_K ／ 中心体 FORM_MSTR_YAW_SC·|τ_z|·FORM_YAW_K → 推力增量（转弯外侧速度补偿 ／ 装配体整体能量补偿）
   ③ 高度协调+耦合补偿：τ_x·CA_RLL2PIT_K·side_sign → 俯仰通道（质心高差升力前馈为主、铰链耦合为辅）
 ```
 
 ### 4.5 存留事项
 
-1. **单侧截断的非线性**：增推条件 `side_sign·τz>0` 在 τz 过零处产生死区型非线性，从机推力通道等效增益随偏航方向跳变。调参（`FORM_YAW_K` 上限已放宽至 5.0）与抗积分饱和设计时需显式考虑该不连续点。
+1. **增推的非线性**：① 从机——条件 `side_sign·τz>0` 在 τz 过零处产生**死区型**非线性，推力通道等效增益随偏航方向跳变；② 中心体——`FORM_MSTR_YAW_SC·|τz|` 在过零处值连续但**导数**不连续，等效增益方向反转。调参（`FORM_YAW_K` 上限已放宽至 5.0）与抗积分饱和设计时需显式考虑这两处。
 2. **多矩阵实例的差异**：分配器第二实例（`c[1]`，多矩阵/VTOL 场景）仅继承了滚→俯混控，**未**实现偏航增推；本版三机均为单一有效性矩阵（固定翼），该差异无影响，但需记录以防后续混构型误用。
 3. `FORM_YAW_K` 量纲：归一化推力增量 per 单位偏航力矩（约 $1/\mathrm{Nm}$），默认 0.3 对应较小的增推强度。
 
 ## 5. 自定义参数汇总
 
-以下 `FORM_*` 参数均定义于 `src/drivers/uavcan/uavcan_params.c`（`Formation Control` 参数组），供 QGC 地面站配置。
+`FORM_*` 参数按消费模块就近定义：`FORM_FOLLOWER_EN`、`FORM_POSITION`、`FORM_YAW_K`、`FORM_MSTR_YAW_SC` 定义于 `src/modules/control_allocator/module.yaml`（`Formation` 参数组）；`FORM_ROLL_LIM`、`FORM_HINGE_K` 定义于 `src/drivers/uavcan/uavcan_params.yaml`（`Formation Control` 参数组）。二者均供 QGC 地面站配置。
 
 | 参数 | 默认值 | 量纲 | 使用位置 | 功能说明 |
 | ---- | ---- | ---- | ---- | ---- |
@@ -242,8 +259,12 @@ ControlAllocator：
 | `FORM_POSITION` | 0 | — | UAVCAN 桥（从机）、ControlAllocator | 编队位置：0 = CENTER，1 = LEFT，2 = RIGHT；决定两处 `side_sign`（+1/−1/0） |
 | `FORM_ROLL_LIM` | 45 | deg | UAVCAN 桥（从机） | 滚转/俯仰**角度**设定限幅（名称含 rate 但非速率限幅，见 3.5 节） |
 | `FORM_HINGE_K` | 1.0 | s | UAVCAN 桥（从机） | 铰链修正增益：$\theta$ 修正 $= \mathrm{side\_sign}\cdot K_h \cdot p_{sp}^{master}$ |
+| `FORM_LINK_LOSS_T` | 2.0 | s | UAVCAN 桥（从机） | 链路丢失保活窗口：末次有效 `ControlInput` 后由本地定时器维持 `offboard_control_mode` 心跳的时长；0 = 关闭保活（恢复心跳绑死接收事件的旧行为）。见 §10.1 |
 | `FORM_YAW_K` | 0.3 | ≈ 1/Nm | ControlAllocator | 偏航增推增益：外侧从机增推 $\lvert\tau_z\rvert\cdot K$（上限已放宽至 5.0，见第 4 节） |
+| `FORM_MSTR_YAW_SC` | 0.0 | — | ControlAllocator | 中心体增推比例（范围 0–1.0）：中心体增推 $= \mathrm{FORM\_MSTR\_YAW\_SC}\cdot\lvert\tau_z\rvert\cdot \mathrm{FORM\_YAW\_K}$；0 表示中心体不参与增推（见 4.3 节） |
 | `CA_RLL2PIT_K` | 0.0 | — | ControlAllocator | 滚转→俯仰混控增益；**自定义参数**（定义于 `src/modules/control_allocator/module.yaml`，范围 ±2.0，2026-04 随编队功能加入），仅从机模式生效：质心高差升力前馈为主、铰链耦合补偿为辅（见 4.3 节） |
+| `FORM_LAYER` | 1 | — | UAVCAN 桥（从机） | 本机层号（0=中心，1..N）：决定是否中继（`layer < FORM_LAYERS`）与期望上游源站；五机扩展见 §11 |
+| `FORM_LAYERS` | 1 | — | UAVCAN 桥（从机） | 本侧层数（1=三机，2=五机）；`layer == FORM_LAYERS` 的最外层不中继；五机扩展见 §11 |
 
 ## 6. 评审讨论结论：设计原则澄清与审阅意见修订
 
@@ -269,7 +290,7 @@ ControlAllocator：
 | 一 | $K_h$ 常增益假设欠严谨，建议闭式化 | **接受，但归入后续优化**。符号由 `side_sign` 完全确定；左右安装严格镜像对称，**无需**引入安装角差参数 | 构型对称性 |
 | 二 | 建议对前馈量加低通 / 改用实测 $p$ | **撤回**。参考量必须为**期望值**；改用实测将构成正反馈（见 6.1） | 6.1 稳定性论证 |
 | 三 | $\max(\cdot,0)$ 单侧截断的非光滑性 | 后续处理（方案见 7.2-D） | — |
-| 四 | 从机侧消息新鲜度 / 丢包处理未见记录 | 后续处理（试飞安全项） | — |
+| 四 | 从机侧消息新鲜度 / 丢包处理未见记录 | **已闭合**（§10.1：COM_DISARM_LAND 根因 + FORM_LINK_LOSS_T 从机保活） | 台架排查 |
 | 五 | 固定翼 `yaw_sp_move_rate` 生效性 + `q_d` 偏航与速率双指令源仲裁 | **已验证通过**，后续优化 | 试飞 / SIL |
 | 六 | roll 通道做同款有效性排查；字段名更名 | roll 通道**不需要**同款排查；`master_roll_signed_err` 后续更名 | — |
 
@@ -573,6 +594,7 @@ ControlAllocator                ──► actuator_motors / actuator_servos
 - **差动推力（链翼关键项）**：新架构内置固定翼前飞的差动推力机制
   `VT_FW_DIFTHR_EN`（bit0=Yaw, bit1=Roll, bit2=Pitch）、`VT_FW_DIFTHR_S_Y/R/P`。
   但**仅在 `vtol_att_control`（tailsitter/tiltrotor）路径生效**；纯固定翼机型不走此路径。
+  （`fw_rate_control` 亦读取 `VT_FW_DIFTHR_EN`，但仅用于设置抗积分饱和标志，不施加差动推力力矩。）
 
 ### 9.5 方案评估（**已更正**）
 
@@ -638,9 +660,171 @@ $$
 4. **ControlAllocator 编队混控**（对应 §4，驱动量与 §4 相同为 $\tau_z$，裁决记录见 §9.5b ③）：滚→俯混控 `c(PITCH) += c(ROLL)·CA_RLL2PIT_K·side_sign`（从机、两矩阵均生效）；转弯增推 `c(THRUST_X) += drive·FORM_YAW_K`（仅矩阵 0），其中驱动量 $drive$ 对从机取 $\max(\mathrm{side\_sign}\cdot\tau_z,\,0)$、对主机取 $\mathrm{FORM\_MSTR\_YAW\_SC}\cdot|\tau_z|$，$\tau_z$ 即分配器控制向量中的偏航力矩分量（`control_sp(YAW)`），无新增订阅。
 5. **从机偏航通道**：`fw_att_control` 新增 `FW_FORM_YAW_EN` 门控的偏航速率注入（方案 A，见 §9.5b ②）。
 
-> **参数放置**：`FORM_FOLLOWER_EN`、`FORM_POSITION`、`FORM_ROLL_LIM`、`FORM_HINGE_K`、`FORM_YAW_K`、`FORM_MSTR_YAW_SC` 统一定义于 `src/drivers/uavcan/uavcan_params.yaml` 的 `Formation Control` 组；`CA_RLL2PIT_K` 定义于 `src/modules/control_allocator/module.yaml`；`FW_FORM_YAW_EN` 定义于 `src/modules/fw_att_control/fw_att_control_params.yaml`（就近于其消费模块，避免依赖倒置）。
+> **参数放置（已迁移）**：`FORM_FOLLOWER_EN`、`FORM_POSITION`、`FORM_YAW_K`、`FORM_MSTR_YAW_SC` 定义于 `src/modules/control_allocator/module.yaml` 的 `Formation` 组；`CA_RLL2PIT_K` 同属该文件；`FORM_ROLL_LIM`、`FORM_HINGE_K` 定义于 `src/drivers/uavcan/uavcan_params.yaml` 的 `Formation Control` 组；`FW_FORM_YAW_EN` 定义于 `src/modules/fw_att_control/fw_att_control_params.yaml`（就近于其消费模块，避免依赖倒置）。
 >
 > **参数名长度约束**：PX4 参数名上限 16 字符（`FORM_MASTER_YAW_SCALE` 超限被构建拒绝，已改为 `FORM_MSTR_YAW_SC`）。
 
-> **已记录的耦合风险**：参数生成与模块启用绑定（`config_module_list` 仅含 Kconfig 启用的模块），因此 ControlAllocator 引用的 `FORM_*` 依赖 UAVCAN 模块被启用。当前链翼构型必须使用 UAVCAN 编队链路，语义上自洽；但若将来出现"启用 ControlAllocator、关闭 UAVCAN"的板级配置，需将共享参数（`FORM_FOLLOWER_EN`、`FORM_POSITION`）迁至 `control_allocator/module.yaml`（依赖方向应由**可选模块指向必需模块**）。发送端对 `FW_MAN_YR_MAX`/`FW_Y_RMAX` 的依赖已通过 Kconfig 的 `depends on MODULES_FW_ATT_CONTROL` 显式化。
+> **耦合风险（已消解）**：参数生成与模块启用绑定（`config_module_list` 仅含 Kconfig 启用的模块）。此前 `FORM_FOLLOWER_EN`、`FORM_POSITION` 定义于 UAVCAN 模块，存在"启用 ControlAllocator、关闭 UAVCAN"时参数缺失的风险；现已将共享参数（`FORM_FOLLOWER_EN`、`FORM_POSITION`、`FORM_YAW_K`、`FORM_MSTR_YAW_SC`）迁至 `control_allocator/module.yaml`，依赖方向为可选模块（UAVCAN）指向必需模块（ControlAllocator），风险消解。发送端对 `FW_MAN_YR_MAX`/`FW_Y_RMAX` 的依赖已通过 Kconfig 的 `depends on MODULES_FW_ATT_CONTROL` 显式化。
+
+## 10. 台架排查记录
+
+本节归档 2026-10 台架测试期间排查的两个关键异常，包含现象、根因链、排除过程与处置结论。
+
+### 10.1 从机高频锁定：主机地面自动上锁 + offboard 心跳超时
+
+**现象**
+- 新架构固件刷入后，台架静置测试时从机**极高频**触发锁定（电机停转、状态灯变红），旧项目（`PX4-Autopilot_library`）几乎不出现同类现象。
+- 从机 `COM_OBL_RC_ACT` 默认值为 0（PosCtl），但掉 OFFBOARD 后瞬间进入锁定，表现为电机静音而非切入位置控制。
+
+**根因时间线**
+
+```text
+t = 0 s   主机地面静置，无操纵输入
+t = 2 s   COM_DISARM_LAND = 2 s 触发，主机自动上锁（默认行为）
+t ≈ 2 s   主机上锁 → fw 控制器停止发布 vehicle_rates_setpoint
+t ≈ 2.5 s FormationRatesSender 的 500 ms 新鲜度门超时，sender 静默
+t ≈ 3.5 s 从机 offboard_control_mode 心跳停更 ≥ COM_OF_LOSS_T = 1 s，掉 OFFBOARD
+t ≈ 3.5 s 从机 commander 触发 offboard 丢失保护 → 按 COM_OBL_RC_ACT = 0 应切 PosCtl，
+          但台架空速无效、无 GPS，位置控制无法启动，实际进入安全状态 → 表现为锁定
+```
+
+**旧项目为何"不暴露"**
+- 旧项目机载参数 `COM_OF_LOSS_T = 5 s`（固件默认值 1 s，旧项目被手动改为 5），将 offboard 超时窗口从 1 s 拉长到 5 s，恰好覆盖了 `COM_DISARM_LAND = 2 s` 的自动上锁窗口。
+- **关键教训**：对比新旧项目行为时，必须**分别核对固件默认值与机载实际参数**。刷机回默认是高频故障源。
+
+**地面测试处置**
+- 主机 / 从机均设 `COM_DISARM_LAND = -1`（禁用地面自动上锁），台架测试期间不再出现因主机静默导致的从机锁定。
+- 同步将 `COM_OF_LOSS_T` 恢复为默认值 `1.0 s`（旧项目的 5 s 是为掩盖问题而妥协，不应继承）。
+
+**固件层加固：FORM_LINK_LOSS_T**
+- 在 `FormationRatesBridge` 中实现**本地定时器保活**：距末次有效 `ControlInput` 小于 `FORM_LINK_LOSS_T` 时，继续以 20 Hz 发布 `offboard_control_mode`（仅维持心跳，**不**重发姿态设定点），避免从机因主机短时信号缺口而掉模式。
+- 该机制仅用于容忍物理链路级抖动（百毫秒级），**不**应对抗主机已上锁后的无限静音。
+- 参数定义见 §5 参数表。
+
+### 10.2 零油门偏航增推失效：2 % 电机停转规则
+
+**现象**
+- 台架测试从机电机：油门杆在底部（0 %）时，仅打偏航杆，电机**无任何差速反应**；稍微推一点油门（约 5 %）后，偏航杆立即产生明显差速。
+- 用户直觉："怠速保护"。
+
+**根因链**
+1. **FixedwingRateControl.cpp L416–437**：推力设定点 `thrust_setpoint = _rates_sp.thrust_body[0]`；若 `thrust_setpoint ≤ 0.02`（2 %），则将其覆写为 `NAN`。
+   ```cpp
+   float thrust_setpoint = _rates_sp.thrust_body[0];
+   // ...
+   if (PX4_ISFINITE(thrust_setpoint) && thrust_setpoint > 0.02f) {
+       // 正常通路
+   } else {
+       thrust_setpoint = NAN;
+   }
+   _vehicle_thrust_setpoint.xyz[0] = thrust_setpoint;
+   ```
+2. **ControlAllocator.cpp L394**：混控前调用 `stopMotorsBasedOnThrustSetpoint(_thrust_sp)`。由于 `_thrust_sp` 已为 `NAN`，纵向电机被标记为停转。
+3. **ControlAllocator.cpp L446–448**：混控与分配完成后，执行 `handle_stopped_motors` → `applyNanToActuators(stopped_motors)`，将已分配好的电机指令**覆写为 NAN**（停转）。
+4. **编队增推的致命顺序**：`apply_formation_mixing()`（偏航增推）在步骤 2 与步骤 3 之间执行，增推后的电机值在步骤 3 中被 NAN 覆写，**永无机会复活**。
+
+**排除记录**
+
+| 假设 | 排查动作 | 结论 |
+| ---- | ---- | ---- |
+| ESC 死区 | 计算：FORM_YAW_K = 3.2、FW_YR_FF = 0.3、FW_Y_RMAX = 50 °/s 时，偏航杆满偏的增推指令约为 0.54，远超任何物理死区 | **排除** |
+| FW_FORM_YAW_EN 未开启 | 用户反驳：若未开，推一点油门也不应有差速；实际推油门后差速明显 | **排除** |
+| 增益压缩清零 | 查 `gain_compression.hpp`：`reset()` 将 `_compression_gain` 置 `1.0`（满增益） | **排除** |
+| 空速缩放归零 | 台架无空速，但 `fw_rate_control` 对无空速情况使用 `_airspeed_scaling = 1.0` | **排除** |
+| 落地检测误触发 | `FixedwingLandDetector` 判定落地纯运动学（空速/速度/加速度/角速度），与油门无关 | **排除** |
+
+**结论**
+- 用户的"怠速保护"直觉**完全正确**。真凶是 fw_rate_control 的 2 % 电机停转规则，其设计本意是防止地面低油门时杆噪误转螺旋桨。
+- **不建议修改代码**：取消 2 % 阈值会倒退安全保护。编队增推在零油门场景本就不具备物理必要性（无推力可分配）。
+- **台架 workaround**：测试偏航增推时保持 **3–5 % 以上基础油门**。
+- **飞行边界提示**：主机在空中进入怠速急降（推力 ≤ 2 %）时，从机电机同样会因该规则停转，编队偏航增推在此边界条件下失效。该行为与旧项目固件一致。
+
+## 11. 版本节点扩展：五机链式中继（Formation Link v2）
+
+> **状态**：代码已实现，编译验证进行中；**台架/试飞未验证**。本节点建立在 §1–§10 所记录的三机版本之上（工作区含 §1 所述未提交的参数迁移），本节只记录五机扩展的协议、决策与风险。
+
+### 11.1 拓扑与总线
+
+```text
+L2 ── L1 ── [C] ── R1 ── R2
+（左右分支线在主机端并入同一 CAN 口 → 一条逻辑总线）
+```
+
+- 五机 = 中心主机（C）+ 每侧两层从机（内层 L1/R1、外层 L2/R2）；内层同时承担**中继**职责。
+- 左右分支线在**主机端并入同一 CAN 口**，构成一条逻辑总线；本项目 DroneCAN 为单实例（`UavcanNode` 为单例，`start()` 在已运行时直接拒绝），单条逻辑总线与其匹配。
+- **直接后果**：所有站点都能看到全部广播——外层**物理上**能收到主机报文。"外层只认内层"完全依赖报文内的 `source` 字段过滤，这是本版新增的**安全关键单点**（见 11.5）。
+
+### 11.2 报文 v2：基准/修正分离 + 源站
+
+字段重构（12 B；DTID 20040 不变）：
+
+| 字段 | 类型 | 语义 |
+| ---- | ---- | ---- |
+| `thrust` | float16 | 归一化推力指令，沿链**透传** |
+| `yaw` | float16 | 偏航速率指令（驾驶员意图/自主指令），沿链**透传** |
+| `base_pitch` | float16 | **装配体基准俯仰**（主机原始值，沿链透传）[rad] |
+| `base_roll` | float16 | **装配体基准滚转**（同上）[rad] |
+| `roll_rate_ref` | float16 | **本发送端自身的期望滚转率**（下游铰链修正驱动）[rad/s] |
+| `source` | uint8 | 源站标识 `(侧<<4)|层` |
+| `flags` | uint8 | `FLAG_VALID` |
+
+改名对照（一并消化 §2.6 记录的语义漂移）：`pitch`→`base_pitch`、`roll_target`→`base_roll`、`master_roll_signed_err`→`roll_rate_ref`。
+
+**源站编码**：C=0x00、L1=0x11、L2=0x12、R1=0x21、R2=0x22（`source = (侧<<4)|层`，侧 0=中心/1=左/2=右）。
+
+**收发规则**（接收端解算公式与三机版一致，仅字段改名）：
+
+- **主机**：广播自身设定点（base=自身 `q_d` 反解、ref=自身 `rates_setpoint.roll`、source=0x00）；门控不变。
+- **内层**：**收到即中继**——`FORM_FOLLOWER_EN==1 && FORM_LAYER < FORM_LAYERS` 且距最后一条**通过源过滤**的有效报文 ≤500 ms 时，以 300 Hz 定时器转发：base/yaw/thrust 透传存储值、ref=**自身** `rates_setpoint.roll`（陈旧/缺失→0）、source=自身站号。中继为"最新值重采样"，不保证逐包对应。
+- **外层**：不中继；期望上游源 `layer≤1`→0x00、`layer>1`→(同侧, layer−1)，其余报文一律丢弃且**不刷新**活性计时（保活与中继共用同一活性判定）。
+
+**五机参数配置表**：
+
+| 机 | `FORM_FOLLOWER_EN` | `FORM_POSITION` | `FORM_LAYER` | `FORM_LAYERS` |
+| ---- | ---- | ---- | ---- | ---- |
+| C | 0 | 0 | —（不读） | —（不读） |
+| L1 / R1 | 1 | 1 / 2 | 1 | 2 |
+| L2 / R2 | 1 | 1 / 2 | 2 | 2 |
+
+三机配置（`FOLLOWER_EN=1`、`LAYER=1`、`LAYERS=1`）行为与本节点之前**完全一致**（新参数默认值即为此）。
+
+### 11.3 决策记录
+
+| # | 决策 | 理由 |
+| ---- | ---- | ---- |
+| 1 | **基准与修正分离**（非级联叠加） | 外层若以内层设定点为基数，会继承内层的修正项并再次叠加自身修正；分离后外层俯仰 = 主机原始俯仰 + `K_h,outer`·(内层期望滚转率)，四片翼各自独立贡献差动升力、互不重复计入 |
+| 2 | 修正驱动取**发送端自身期望滚转率** | 与 §6.1 一致（参考量必须是"期望量"）；外层铰链相对其直接邻居（内层），不构成正反馈 |
+| 3 | **收到即中继**（不门控 OFFBOARD） | 中继定位为链路层功能：只要上游有效即转发；代价是非 OFFBOARD 的内层会产生"base 来自主机、ref 来自内层自身飞行"的混合语义（已明确接受；将来可加一行 `nav_state==OFFBOARD` 门控退回保守行为） |
+| 4 | **源站字段过滤**（非 CAN 源节点 ID） | 自描述、零额外配置；同一逻辑总线上必须区分 C/L1/L2 的报文（外层在物理上收得到主机包） |
+| 5 | 用 `FORM_LAYER`/`FORM_LAYERS` 扩展（不扩 `FORM_POSITION`） | `FORM_POSITION` 保持 0/1/2 三值，ControlAllocator 的 `formation_side_sign()` 与 `CA_RLL2PIT_K` 混控**零改动**；默认值兼容三机 |
+| 6 | 中继归属**桥**（不复用发送端类） | 分离语义下 base 不能从内层自身 `att_sp` 读取（那是含修正的合成值），必须由桥保存最近一条通过的报文原样透传；发送端类保持主机专用 |
+
+### 11.4 失效级联
+
+```text
+主机静默 → 主机发送端 500 ms 新鲜度超时静默
+        → 内层中继（最后接收 +500 ms）静默
+        → 外层走自身 FORM_LINK_LOSS_T → offboard 失效保护
+```
+
+- 比三机版多一跳、约 +0.5 s；顺序仍为"内层先、外层后"。
+- **中继与内层自身状态解耦**（收到即中继）：内层上锁/失能不会断链，只有主机静默才断——与 §10.1 的"保活只容忍短抖、不跟随已上锁主机"方向一致，但属新行为，台架需确认时序。
+
+### 11.5 风险登记
+
+1. **源过滤是唯一"配错就危险"的单点**：外层误收主机包会用错参考量。台架必须覆盖"外层丢错源"用例；建议后续增加非期望源报文计数/限频告警。
+2. **中继与内层状态解耦**：风险窗口为"内层非 OFFBOARD 但主机仍在广播"（行为已明确接受，见 11.3-#3）。
+3. **单总线负载**：3 个发送端 ×300 Hz、12 B/包（classic CAN 约 2 帧/包）→ 粗估 20–25% @1 Mbps，需实测；兜底为将中继降频（当前为 300 Hz 常量）。
+4. **报文 v2 与旧固件不互通**：携带 `source` 的新布局要求五机**同步刷写**。
+
+### 11.6 验证清单
+
+- [ ] 编译通过（`cuav_7-nano_default`），生成头 `ControlInput.hpp` 含新字段；
+- [ ] 回归：C+L1+R1（默认参数）三机行为与之前一致；
+- [ ] 中继：C+L1+L2——L2 只收 0x11、拒绝 0x00（丢错源用例）；
+- [ ] 失效顺序：停主机，计时 主机 0.5 s → 内层 0.5 s → 外层 keep-alive → failsafe；
+- [ ] 总线负载实测（目标 <30%）；
+- [ ] 行为抽查：L1 转 manual，确认 L2 收到的 base 仍为主机、ref 随 L1。
+
+> 参数：`FORM_LAYER`（int32，默认 1，范围 0..7）、`FORM_LAYERS`（int32，默认 1，范围 1..7），定义于 `src/drivers/uavcan/uavcan_params.yaml` 的 `Formation Control` 组。
 
